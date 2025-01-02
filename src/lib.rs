@@ -3,7 +3,7 @@ macro_rules! build_main {
     ($input:literal, $( $part:literal => $solver:expr),+) => {
         use std::time::Instant;
         fn main() {
-            let input: &str = include_str!($input);
+            let input: &str = include_str!(concat!("../input/", $input));
             $(
             let start = Instant::now();
             let result = $solver(input);
@@ -19,7 +19,7 @@ macro_rules! build_main_res {
     ($input:literal, $( $part:literal => $solver:expr),+) => {
         use std::time::Instant;
         fn main() {
-            let input: &str = include_str!($input);
+            let input: &str = include_str!(concat!("../input/", $input));
             $(
             let start = Instant::now();
             let result = $solver(input).unwrap();
