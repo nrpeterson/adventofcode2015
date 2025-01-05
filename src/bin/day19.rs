@@ -1,94 +1,138 @@
 use std::collections::{HashMap, HashSet};
-use std::ops::Index;
-use itertools::{chain, Itertools};
 use adventofcode2015::build_main;
 
 #[derive(Debug, Eq, PartialEq, Clone)]
-struct Rule<'a> {
-    from: &'a str,
-    to: Vec<&'a str>
+struct Rule {
+    from: String,
+    to: Vec<String>
 }
 
-struct Grammar<'a> {
-    start_rule: Rule<'a>,
-    rules: HashMap<&'a str, Vec<Rule<'a>>>,
-    nonterminals: HashSet<&'a str>
+struct Grammar {
+    start_rule: Rule,
+    rules: HashMap<String, Vec<Rule>>
 }
 
-#[derive(Copy, Clone, Eq, PartialEq, Debug)]
-struct EarleyItem<'a> {
-    rule: &'a Rule<'a>,
-    rule_item: usize,
-    start: usize
+impl Grammar {
+    fn new(start_rule: Rule, rules_list: Vec<Rule>) -> Grammar {
+        let mut rules: HashMap<String, Vec<Rule>> = HashMap::new();
+        rules_list.into_iter().for_each(|rule| {
+            rules.entry(rule.from.clone())
+                .or_default()
+                .push(rule);
+        });
+
+        Grammar { start_rule, rules }
+    }
 }
 
-#[derive(Copy, Clone, Debug)]
-struct BackPointer {
-    from: (usize, usize),
-    by: Option<(usize, usize)>
-}
+mod earley {
+    use std::ops::Index;
+    use itertools::{chain, Itertools};
+    use crate::{Grammar, Rule};
 
-#[derive(Clone, Debug)]
-struct StateSet<'a>(Vec<(EarleyItem<'a>, Vec<BackPointer>)>);
+    #[derive(Copy, Clone)]
+    struct BackPointer {
+        prev_item: (usize, usize),
+        advanced_by: Option<(usize, usize)>
+    }
 
-impl<'a> StateSet<'a> {
-    fn new() -> StateSet<'a> { StateSet(Vec::new()) }
+    #[derive(Debug, Eq, PartialEq, Clone)]
+    struct EarleyItem {
+        rule: Rule,
+        rule_state: usize,
+        parse_start: usize
+    }
 
-    fn insert(&mut self, item: EarleyItem<'a>, pred: Option<BackPointer>) {
-        for (item_i, preds_i) in self.0.iter_mut() {
-            if *item_i == item {
-                pred.into_iter().for_each(|p| preds_i.push(p));
-                return
+    impl EarleyItem {
+        fn is_complete(&self) -> bool {
+            self.rule_state == self.rule.to.len()
+        }
+
+        fn cur_symb(&self) -> Option<&String> {
+            self.rule.to.get(self.rule_state)
+        }
+    }
+
+    struct ParseTable {
+        data: Vec<Vec<(EarleyItem, Vec<BackPointer>)>>,
+        completed_start_rule: Option<(usize, usize)>
+    }
+
+    impl ParseTable {
+        fn with_rows(n: usize) -> ParseTable {
+            let data = vec![Vec::new(); n];
+            let completed_start_rule = None;
+            ParseTable { data, completed_start_rule }
+        }
+
+        fn insert(&mut self, item: EarleyItem, parse_end: usize, pred: Option<BackPointer>) {
+            for (item_i, preds_i) in self.data[parse_end].iter_mut() {
+                if *item_i == item {
+                    pred.into_iter().for_each(|p| preds_i.push(p));
+                    return
+                }
             }
+
+            let preds = pred.into_iter().collect();
+            self.data[parse_end].push((item, preds));
         }
 
-        let preds = pred.into_iter().collect();
-        self.0.push((item, preds));
-    }
-
-    fn len(&self) -> usize { self.0.len() }
-
-    fn iter(&self) -> impl Iterator<Item=&(EarleyItem<'a>, Vec<BackPointer>)> {
-        self.0.iter()
-    }
-}
-
-impl<'a> Index<usize> for StateSet<'a> {
-    type Output = (EarleyItem<'a>, Vec<BackPointer>);
-    fn index(&self, idx: usize) -> &(EarleyItem<'a>, Vec<BackPointer>) { &self.0[idx] }
-}
-
-impl<'a> Grammar<'a> {
-    fn new(start_rule: Rule<'a>, other_rules: Vec<Rule<'a>>) -> Grammar<'a> {
-        let mut rules = HashMap::new();
-        for rule in other_rules {
-            rules.entry(rule.from).or_insert_with(Vec::new).push(rule);
+        fn iter(&self) -> impl Iterator<Item=&Vec<(EarleyItem, Vec<BackPointer>)>> {
+            self.data.iter()
         }
-
-        let nonterminals = rules.keys().cloned().collect();
-
-        Grammar { start_rule, rules, nonterminals }
     }
 
-    fn build_table(&'a self, target: &[&'a str]) -> Vec<StateSet<'a>> {
-        let mut table = vec![StateSet::new(); target.len() + 1];
-        table[0].insert(EarleyItem { rule: &self.start_rule, rule_item: 0, start: 0 }, None);
+    impl Index<usize> for ParseTable {
+        type Output = Vec<(EarleyItem, Vec<BackPointer>)>;
 
-        for k in 0..=target.len() {
-            let mut i = 0;
-            while i < table[k].len() {
-                let EarleyItem { rule, rule_item, start } = table[k][i].0;
+        fn index(&self, index: usize) -> &Self::Output {
+            &self.data[index]
+        }
+    }
 
-                if rule_item == rule.to.len() {
-                    // Completion
+    fn build_parse_table<'a>(grammar: &Grammar, target: &[String]) -> ParseTable {
+        let mut table: ParseTable = ParseTable::with_rows(target.len() + 1);
+
+        table.insert(
+            EarleyItem { rule: grammar.start_rule.clone(), rule_state: 0, parse_start: 0 },
+            0,
+            None
+        );
+
+        for cur_parse_end in 0..=target.len() {
+            let mut cur_item_index = 0;
+            while cur_item_index < table[cur_parse_end].len() {
+                let cur_symb = table[cur_parse_end][cur_item_index].0
+                    .cur_symb()
+                    .map(|symb| symb.clone());
+
+
+                if cur_symb.is_none() {
+                    // We've completed this item. If any items were waiting for this, we can
+                    // advance them one step.
+                    let cur_item  = &table[cur_parse_end][cur_item_index].0;
+                    let cur_parse_start = cur_item.parse_start;
+                    let cur_rule_from = cur_item.rule.from.clone();
+
                     let mut j = 0;
-                    while j < table[start].len() {
-                        let EarleyItem { rule: r, rule_item: r_item, start: s } = table[start][j].0;
+                    while j < table[cur_parse_start].len() {
+                        let next_item = &table[cur_parse_start][j].0;
 
-                        if r_item < r.to.len() && r.to[r_item] == rule.from {
-                            table[k].insert(
-                                EarleyItem { rule: r, rule_item: r_item + 1, start: s },
-                                Some(BackPointer { from: (start, j), by: Some((k, i)) })
+                        if !next_item.is_complete() &&
+                            next_item.rule.to[next_item.rule_state] == cur_rule_from {
+                            let new_item = EarleyItem {
+                                rule: next_item.rule.clone(),
+                                rule_state: next_item.rule_state + 1,
+                                parse_start: next_item.parse_start
+                            };
+
+                            table.insert(
+                                new_item,
+                                cur_parse_end,
+                                Some(BackPointer {
+                                    prev_item: (cur_parse_start, j),
+                                    advanced_by: Some((cur_parse_end, cur_item_index))
+                                })
                             );
                         }
 
@@ -96,46 +140,71 @@ impl<'a> Grammar<'a> {
                     }
                 }
                 else {
-                    // Scan.  Note we want to allow non-terminals in search string, so we don't restrict
-                    // scanning to terminals.
-                    if k < target.len() && rule.to[rule_item] == target[k] {
-                        table[k+1].insert(
-                            EarleyItem { rule, rule_item: rule_item + 1, start },
-                            Some(BackPointer { from: (k, i), by: None })
+                    let cur_item = &table[cur_parse_end][cur_item_index].0;
+                    let cur_rule_symb = cur_item.cur_symb().unwrap().clone();
+
+                    // Scan: if the current symbol of target matches the current symbol of our
+                    // current rule, we can "consume" it and advance this rule by one.
+                    //
+                    // Note that unlike the traditional Earley parser, I've allowed this to
+                    // happen whether or not the current symbol is terminal.  That way, we can
+                    // query against nonterminal symbols instead of having to modify the
+                    // grammar.
+                    if cur_parse_end < target.len() && *cur_rule_symb == target[cur_parse_end] {
+                        table.insert(
+                            EarleyItem {
+                                rule: cur_item.rule.clone(),
+                                rule_state: cur_item.rule_state + 1,
+                                parse_start: cur_item.parse_start },
+                            cur_parse_end + 1,
+                            Some(BackPointer {
+                                prev_item: (cur_parse_end, cur_item_index),
+                                advanced_by: None }
+                            )
                         );
                     }
 
-                    if self.nonterminals.contains(rule.to[rule_item]) {
-                        // Predict.
-                        for r in self.rules[&rule.to[rule_item]].iter() {
-                            if r.from == rule.to[rule_item] {
-                                table[k].insert(
-                                    EarleyItem { rule: r, rule_item: 0, start: k },
-                                    None
-                                );
-                            }
+                    // Predict: we may want to use another rule whose "from" is our current
+                    // rule's current symbol, so insert them at this point to give it a try.
+                    if grammar.rules.contains_key(&cur_rule_symb) {
+                        for rule in grammar.rules[&cur_rule_symb].iter() {
+                            table.insert(
+                                EarleyItem {
+                                    rule: rule.clone(),
+                                    rule_state: 0,
+                                    parse_start: cur_parse_end
+                                },
+                                cur_parse_end,
+                                None
+                            );
                         }
                     }
                 }
 
-                i += 1;
+                cur_item_index += 1;
             }
         }
+
+        let k = target.len();
+        let completed_start = table[k].iter().enumerate()
+            .find(|(_, (item, _))| item.is_complete() && item.rule == grammar.start_rule)
+            .map(|(i, _)| (k, i));
+
+        table.completed_start_rule = completed_start;
 
         table
     }
 
-    fn min_parse_tree(&self, target: &[&'a str]) -> usize {
-        let table = self.build_table(target);
+    pub fn min_parse_tree(grammar: &Grammar, target: &[String]) -> usize {
+        let table = build_parse_table(grammar, target);
         let mut cache: Vec<Vec<Option<usize>>> = table.iter().map(
             |s| s.iter().map(|_| None).collect()
         ).collect();
 
-
         let k0 = target.len();
         let i0 = table[k0].iter().enumerate()
             .find(|(_, (item, _))| {
-                *item.rule == self.start_rule && item.rule_item == self.start_rule.to.len()
+                item.rule == grammar.start_rule && item.is_complete()
             })
             .map(|(i, _)| i)
             .expect("No solutions found");
@@ -151,18 +220,18 @@ impl<'a> Grammar<'a> {
                 }
                 else {
                     let missing_deps: Vec<(usize, usize)> = backpointers.iter()
-                        .flat_map(|bp| chain!([bp.from], bp.by))
+                        .flat_map(|bp| chain!([bp.prev_item], bp.advanced_by))
                         .unique()
                         .filter(|&pos| cache[pos.0][pos.1].is_none())
                         .collect();
 
                     if missing_deps.is_empty() {
                         let result = backpointers.iter()
-                            .map(|&BackPointer { from, by }| {
-                                let child = by.and_then(|(s, t)| cache[s][t])
+                            .map(|&BackPointer { prev_item, advanced_by }| {
+                                let child = advanced_by.and_then(|(s, t)| cache[s][t])
                                     .unwrap_or(0);
 
-                                cache[from.0][from.1].unwrap() + child
+                                cache[prev_item.0][prev_item.1].unwrap() + child
                             })
                             .min()
                             .unwrap();
@@ -202,11 +271,14 @@ mod parse {
         one_of("abcdefghijklmnopqrstuvwxyz")(input)
     }
 
-    fn symbol(input: &str) -> IResult<&str, &str> {
-        alt((
-            recognize(pair(upper_char, many0(lower_char))),
-            recognize(character('e'))
-        ))(input)
+    fn symbol(input: &str) -> IResult<&str, String> {
+        map(
+            alt((
+                recognize(pair(upper_char, many0(lower_char))),
+                recognize(character('e'))
+            )),
+            |s: &str| s.to_owned()
+        )(input)
     }
 
     fn rule(input: &str) -> IResult<&str, Rule> {
@@ -224,13 +296,13 @@ mod parse {
         map(
             separated_list1(newline, rule),
             |rules| {
-                let start_rule = Rule { from: "S0", to: vec!["e"] };
+                let start_rule = Rule { from: "S0".to_owned(), to: vec!["e".to_owned()] };
                 Grammar::new(start_rule, rules)
             }
         )(input)
     }
 
-    pub fn input(input: &str) -> IResult<&str, (Grammar, Vec<&str>)> {
+    pub fn input(input: &str) -> IResult<&str, (Grammar, Vec<String>)> {
         separated_pair(grammar, multispace1, many1(symbol))(input)
     }
 }
@@ -244,10 +316,10 @@ fn part1(input: &str) -> usize {
         for rule in rules {
             for i in 0..target.len() {
                 if target[i] == rule.from {
-                    let mut new: Vec<&str> = Vec::new();
-                    new.extend(&target[..i]);
-                    new.extend(&rule.to);
-                    new.extend(&target[i+1..]);
+                    let mut new: Vec<String> = Vec::new();
+                    new.extend(target[..i].iter().cloned());
+                    new.extend(rule.to.iter().cloned());
+                    new.extend(target[i+1..].iter().cloned());
                     seen.insert(new);
                 }
             }
@@ -259,7 +331,7 @@ fn part1(input: &str) -> usize {
 fn part2(input: &str) -> usize {
     let (grammar, target) = parse::input(input).unwrap().1;
 
-    grammar.min_parse_tree(&target) - 1
+    earley::min_parse_tree(&grammar, &target) - 1
 }
 
 
